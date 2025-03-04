@@ -247,7 +247,7 @@ def ai_move():
     ai_type = ai_settings.get("aiType", "mccfr")  # 'mccfr' по умолчанию
 
     try:
-        # Обработка и валидация данных (используем .get() с значениями по умолчанию)
+        # Обработка и валидация данных
         selected_cards = [Card.from_dict(card) for card in game_state_data.get("selected_cards", [])]
         discarded_cards = [Card.from_dict(card) for card in game_state_data.get("discarded_cards", [])]
 
@@ -270,15 +270,17 @@ def ai_move():
         )
         logger.debug(f"Создано состояние игры: {game_state}")
 
-        # Проверка терминального состояния
-        if game_state.is_terminal():
-            logger.info("Игра в терминальном состоянии")
+        # Проверка терминального состояния до хода
+        is_terminal_before = game_state.is_terminal()
+        
+        if is_terminal_before:
+            # Если игра уже завершена, рассчитываем роялти и сохраняем прогресс
             payoff = game_state.get_payoff()
             royalties = game_state.calculate_royalties()
             total_royalty = sum(royalties.values())
             logger.info(f"Игра окончена. Выплата: {payoff}, Роялти: {royalties}, Всего: {total_royalty}")
 
-            # Сохранение прогресса AI (для MCCFR) *перед* отправкой ответа
+            # Сохранение прогресса AI (для MCCFR)
             if cfr_agent and ai_settings.get("aiType") == "mccfr":
                 try:
                     cfr_agent.save_progress()
@@ -290,18 +292,44 @@ def ai_move():
                 except Exception as e:
                     logger.error(f"Ошибка сохранения прогресса AI: {e}")
 
-            return (
-                jsonify(
-                    {
-                        "message": "Game over",
-                        "payoff": payoff,
-                        "royalties": royalties,
-                        "total_royalty": total_royalty,
-                    }
-                ),
-                200,
-            )
-
+            return jsonify({
+                "message": "Game over",
+                "payoff": payoff,
+                "royalties": royalties,
+                "total_royalty": total_royalty,
+                "game_over": True
+            }), 200
+        
+        # Получаем доступные ходы
+        actions = game_state.get_actions()
+        
+        # Если нет доступных ходов, но игра не в терминальном состоянии,
+        # считаем это завершением игры
+        if not actions:
+            logger.info("Нет доступных ходов, но игра не в терминальном состоянии. Считаем игру завершенной.")
+            royalties = game_state.calculate_royalties()
+            total_royalty = sum(royalties.values())
+            
+            # Сохранение прогресса AI (для MCCFR)
+            if cfr_agent and ai_settings.get("aiType") == "mccfr":
+                try:
+                    cfr_agent.save_progress()
+                    logger.info("Прогресс AI сохранен локально.")
+                    if github_utils.save_ai_progress_to_github():  # Попытка сохранить на GitHub
+                        logger.info("Прогресс AI сохранен на GitHub.")
+                    else:
+                        logger.warning("Не удалось сохранить прогресс AI на GitHub.")
+                except Exception as e:
+                    logger.error(f"Ошибка сохранения прогресса AI: {e}")
+            
+            return jsonify({
+                "message": "Game over - no more valid moves",
+                "royalties": royalties,
+                "total_royalty": total_royalty,
+                "game_over": True
+            }), 200
+        
+        # Если игра не завершена, получаем ход AI
         timeout_event = Event()
         result = {"move": None}
 
@@ -332,23 +360,45 @@ def ai_move():
             logger.error(f"Ошибка хода AI: {move.get('error', 'Unknown error')}")
             return jsonify({"error": move.get("error", "Unknown error")}), 500
 
-        # Применяем ход к копии состояния игры *перед* расчетом роялти
+        # Применяем ход к копии состояния игры
         next_game_state = game_state.apply_action(move)
-        royalties = next_game_state.calculate_royalties()
-        total_royalty = sum(royalties.values())
-
-        logger.debug(f"Отправка хода AI: {move}, Роялти: {royalties}, Всего роялти: {total_royalty}")
-        logger.debug("Обработка запроса хода AI - END")
-        return (
-            jsonify(
-                {
-                    "move": serialize_move(move),
-                    "royalties": royalties,
-                    "total_royalty": total_royalty,
-                }
-            ),
-            200,
-        )
+        
+        # Проверяем, стало ли состояние терминальным после хода
+        is_terminal_after = next_game_state.is_terminal()
+        
+        # Если игра завершена после хода, рассчитываем роялти и сохраняем прогресс
+        if is_terminal_after:
+            payoff = next_game_state.get_payoff()
+            royalties = next_game_state.calculate_royalties()
+            total_royalty = sum(royalties.values())
+            logger.info(f"Игра окончена после хода. Выплата: {payoff}, Роялти: {royalties}, Всего: {total_royalty}")
+            
+            # Сохранение прогресса AI (для MCCFR)
+            if cfr_agent and ai_settings.get("aiType") == "mccfr":
+                try:
+                    cfr_agent.save_progress()
+                    logger.info("Прогресс AI сохранен локально.")
+                    if github_utils.save_ai_progress_to_github():  # Попытка сохранить на GitHub
+                        logger.info("Прогресс AI сохранен на GitHub.")
+                    else:
+                        logger.warning("Не удалось сохранить прогресс AI на GitHub.")
+                except Exception as e:
+                    logger.error(f"Ошибка сохранения прогресса AI: {e}")
+            
+            return jsonify({
+                "move": serialize_move(move),
+                "royalties": royalties,
+                "total_royalty": total_royalty,
+                "game_over": True,
+                "payoff": payoff
+            }), 200
+        else:
+            # Если игра не завершена, возвращаем только ход без роялти
+            return jsonify({
+                "move": serialize_move(move),
+                "royalties": {},  # Пустой словарь, так как роялти считаются только в конце игры
+                "total_royalty": 0
+            }), 200
 
     except Exception as e:
         logger.exception(f"Ошибка в ai_move: {e}")
