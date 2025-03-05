@@ -7,6 +7,7 @@ import time
 import json
 from threading import Thread, Event
 import logging
+import utils
 from ai_engine import CFRAgent, RandomAgent, Card, Board, GameState
 
 logging.basicConfig(level=logging.DEBUG, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
